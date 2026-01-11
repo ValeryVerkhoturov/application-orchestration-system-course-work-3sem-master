@@ -1,0 +1,570 @@
+# Python Flask Application for Node 2
+# Connects to PostgreSQL database
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-node2-code
+  namespace: node2-services
+data:
+  app.py: |
+    from flask import Flask, jsonify, request
+    import psycopg2
+    import os
+    import logging
+    from datetime import datetime
+    import socket
+
+    app = Flask(__name__)
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    def get_db_connection():
+        """Create database connection"""
+        try:
+            conn = psycopg2.connect(
+                host=os.environ.get('DB_HOST', 'postgres-node2'),
+                port=os.environ.get('DB_PORT', '5432'),
+                database=os.environ.get('DB_NAME', 'node2_db'),
+                user=os.environ.get('DB_USER', 'app_user'),
+                password=os.environ.get('DB_PASSWORD', 'PLACEHOLDER_FROM_VAULT')
+            )
+            return conn
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
+            raise
+
+    def init_db():
+        """Initialize database tables"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS orders (
+                    id SERIAL PRIMARY KEY,
+                    product_name VARCHAR(255) NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    price DECIMAL(10, 2),
+                    status VARCHAR(50) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    node_id VARCHAR(50) DEFAULT 'node2'
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id SERIAL PRIMARY KEY,
+                    action VARCHAR(100),
+                    entity_type VARCHAR(100),
+                    entity_id INTEGER,
+                    hostname VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            cur.close()
+            conn.close()
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization error: {e}")
+
+    @app.route('/')
+    def index():
+        """Root endpoint"""
+        return jsonify({
+            'service': 'Node 2 Python App',
+            'version': '1.0.0',
+            'hostname': socket.gethostname(),
+            'timestamp': datetime.now().isoformat()
+        })
+
+    @app.route('/health')
+    def health():
+        """Health check endpoint"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT 1')
+            cur.close()
+            conn.close()
+            return jsonify({
+                'status': 'healthy',
+                'database': 'connected',
+                'hostname': socket.gethostname(),
+                'timestamp': datetime.now().isoformat()
+            })
+        except Exception as e:
+            return jsonify({
+                'status': 'unhealthy',
+                'database': 'disconnected',
+                'error': str(e),
+                'hostname': socket.gethostname()
+            }), 500
+
+    @app.route('/ready')
+    def ready():
+        """Readiness check"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT 1')
+            cur.close()
+            conn.close()
+            return jsonify({'ready': True})
+        except:
+            return jsonify({'ready': False}), 503
+
+    @app.route('/orders', methods=['GET'])
+    def get_orders():
+        """Get all orders"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT id, product_name, quantity, price, status, created_at, node_id FROM orders ORDER BY created_at DESC')
+            orders = cur.fetchall()
+            cur.close()
+            conn.close()
+            return jsonify({
+                'orders': [
+                    {
+                        'id': row[0],
+                        'product_name': row[1],
+                        'quantity': row[2],
+                        'price': float(row[3]) if row[3] else None,
+                        'status': row[4],
+                        'created_at': row[5].isoformat() if row[5] else None,
+                        'node_id': row[6]
+                    } for row in orders
+                ],
+                'count': len(orders)
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/orders', methods=['POST'])
+    def create_order():
+        """Create new order"""
+        try:
+            data = request.get_json()
+            product_name = data.get('product_name')
+            quantity = data.get('quantity', 1)
+            price = data.get('price')
+            
+            if not product_name:
+                return jsonify({'error': 'Product name is required'}), 400
+            
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                'INSERT INTO orders (product_name, quantity, price, node_id) VALUES (%s, %s, %s, %s) RETURNING id',
+                (product_name, quantity, price, 'node2')
+            )
+            order_id = cur.fetchone()[0]
+            
+            # Log the action
+            cur.execute(
+                'INSERT INTO audit_log (action, entity_type, entity_id, hostname) VALUES (%s, %s, %s, %s)',
+                ('CREATE', 'order', order_id, socket.gethostname())
+            )
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            logger.info(f"Created order {order_id}: {product_name}")
+            return jsonify({
+                'id': order_id,
+                'product_name': product_name,
+                'quantity': quantity,
+                'price': price,
+                'status': 'pending',
+                'node_id': 'node2',
+                'message': 'Order created successfully'
+            }), 201
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/orders/<int:order_id>', methods=['PUT'])
+    def update_order_status(order_id):
+        """Update order status"""
+        try:
+            data = request.get_json()
+            status = data.get('status')
+            
+            if not status:
+                return jsonify({'error': 'Status is required'}), 400
+            
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('UPDATE orders SET status = %s WHERE id = %s RETURNING id', (status, order_id))
+            updated = cur.fetchone()
+            
+            if updated:
+                cur.execute(
+                    'INSERT INTO audit_log (action, entity_type, entity_id, hostname) VALUES (%s, %s, %s, %s)',
+                    ('UPDATE', 'order', order_id, socket.gethostname())
+                )
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            if updated:
+                return jsonify({'message': f'Order {order_id} status updated to {status}'})
+            return jsonify({'error': 'Order not found'}), 404
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/orders/<int:order_id>', methods=['DELETE'])
+    def delete_order(order_id):
+        """Delete order"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM orders WHERE id = %s RETURNING id', (order_id,))
+            deleted = cur.fetchone()
+            
+            if deleted:
+                cur.execute(
+                    'INSERT INTO audit_log (action, entity_type, entity_id, hostname) VALUES (%s, %s, %s, %s)',
+                    ('DELETE', 'order', order_id, socket.gethostname())
+                )
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            if deleted:
+                return jsonify({'message': f'Order {order_id} deleted'})
+            return jsonify({'error': 'Order not found'}), 404
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/audit', methods=['GET'])
+    def get_audit_log():
+        """Get audit log"""
+        try:
+            limit = request.args.get('limit', 50, type=int)
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT id, action, entity_type, entity_id, hostname, created_at FROM audit_log ORDER BY created_at DESC LIMIT %s', (limit,))
+            logs = cur.fetchall()
+            cur.close()
+            conn.close()
+            return jsonify({
+                'audit_logs': [
+                    {
+                        'id': row[0],
+                        'action': row[1],
+                        'entity_type': row[2],
+                        'entity_id': row[3],
+                        'hostname': row[4],
+                        'created_at': row[5].isoformat() if row[5] else None
+                    } for row in logs
+                ],
+                'count': len(logs)
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/db/stats')
+    def db_stats():
+        """Database statistics"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT COUNT(*) FROM orders')
+            orders_count = cur.fetchone()[0]
+            cur.execute('SELECT COUNT(*) FROM audit_log')
+            audit_count = cur.fetchone()[0]
+            cur.execute('SELECT version()')
+            pg_version = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            
+            return jsonify({
+                'orders_count': orders_count,
+                'audit_logs_count': audit_count,
+                'postgres_version': pg_version,
+                'node': 'node2',
+                'hostname': socket.gethostname()
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    # Initialize database on module load (works with Gunicorn)
+    with app.app_context():
+        import time
+        max_retries = 10
+        for i in range(max_retries):
+            try:
+                init_db()
+                logger.info("Database initialization complete")
+                break
+            except Exception as e:
+                logger.warning(f"DB init attempt {i+1}/{max_retries} failed: {e}")
+                if i < max_retries - 1:
+                    time.sleep(3)
+                else:
+                    logger.error("Failed to initialize database after all retries")
+
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=5000, debug=False)
+
+  requirements.txt: |
+    flask==3.0.0
+    psycopg2-binary==2.9.9
+    gunicorn==21.2.0
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-node2-config
+  namespace: node2-services
+data:
+  POSTGRES_DB: "node2_db"
+  POSTGRES_USER: "app_user"
+  PGDATA: "/var/lib/postgresql/data/pgdata"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-node2-secret
+  namespace: node2-services
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "SecurePass456_Node2"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-node2-pvc
+  namespace: node2-services
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# PostgreSQL Database for Node 2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-node2
+  namespace: node2-services
+  labels:
+    app: postgres
+    node: node2
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+      node: node2
+  template:
+    metadata:
+      labels:
+        app: postgres
+        node: node2
+        tier: database
+    spec:
+      nodeSelector:
+        worker-id: node2
+      restartPolicy: Always
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - configMapRef:
+                name: postgres-node2-config
+            - secretRef:
+                name: postgres-node2-secret
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - app_user
+                - -d
+                - node2_db
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - app_user
+                - -d
+                - node2_db
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-node2-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-node2
+  namespace: node2-services
+  labels:
+    app: postgres
+    node: node2
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: postgres
+    node: node2
+---
+# Python Flask Application Deployment for Node 2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-app-node2
+  namespace: node2-services
+  labels:
+    app: python-app
+    node: node2
+    tier: backend
+spec:
+  replicas: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: python-app
+      node: node2
+  template:
+    metadata:
+      labels:
+        app: python-app
+        node: node2
+        tier: backend
+    spec:
+      nodeSelector:
+        worker-id: node2
+      restartPolicy: Always
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z postgres-node2 5432; do echo waiting for postgres; sleep 2; done; echo postgres is ready']
+      containers:
+        - name: python-app
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir -r /app/requirements.txt &&
+              cd /app &&
+              gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --access-logfile - --error-logfile - app:app
+          ports:
+            - containerPort: 5000
+              name: http
+          env:
+            - name: DB_HOST
+              value: "postgres-node2"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-node2-config
+                  key: POSTGRES_DB
+            - name: DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: postgres-node2-config
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-node2-secret
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: app-code
+          configMap:
+            name: app-node2-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-app-node2
+  namespace: node2-services
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: 5000
+      name: http
+  selector:
+    app: python-app
+    node: node2
+---
+# NodePort Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-app-node2-external
+  namespace: node2-services
+spec:
+  type: NodePort
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30502
+      name: http
+  selector:
+    app: python-app
+    node: node2

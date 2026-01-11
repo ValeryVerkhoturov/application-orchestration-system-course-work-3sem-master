@@ -1,0 +1,83 @@
+# Kind Cluster Configuration
+# 1 Master (control-plane) + 2 Workers
+# Симуляция физических/виртуальных серверов
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: production-cluster
+
+nodes:
+  # Master Node (Control Plane)
+  # Политика отказоустойчивости: автовосстановление через N попыток
+  - role: control-plane
+    labels:
+      node-role: master
+      fault-tolerance: auto-recovery
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=master"
+    extraPortMappings:
+      # NodePort для доступа к сервисам
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 30443
+        protocol: TCP
+      # Grafana
+      - containerPort: 30300
+        hostPort: 30300
+        protocol: TCP
+      # Vault
+      - containerPort: 30820
+        hostPort: 30820
+        protocol: TCP
+      # Python App Node 1
+      - containerPort: 30501
+        hostPort: 30501
+        protocol: TCP
+      # Python App Node 2
+      - containerPort: 30502
+        hostPort: 30502
+        protocol: TCP
+
+  # Worker Node 1
+  # Политика отказоустойчивости для сервисов: автовосстановление через N попыток
+  # Единый слой данных: PostgreSQL
+  - role: worker
+    labels:
+      node-role: worker
+      worker-id: node1
+      fault-tolerance: auto-recovery
+      data-layer: postgres
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=worker,worker-id=node1,data-layer=postgres"
+
+  # Worker Node 2
+  # Политика отказоустойчивости для сервисов: автовосстановление через N попыток
+  # Единый слой данных: PostgreSQL
+  - role: worker
+    labels:
+      node-role: worker
+      worker-id: node2
+      fault-tolerance: auto-recovery
+      data-layer: postgres
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=worker,worker-id=node2,data-layer=postgres"
+
+# Сетевые настройки
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  disableDefaultCNI: false

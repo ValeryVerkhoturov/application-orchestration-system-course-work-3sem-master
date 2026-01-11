@@ -1,0 +1,38 @@
+# Namespaces for cluster organization
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node1-services
+  labels:
+    node: node1
+    purpose: applications
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node2-services
+  labels:
+    node: node2
+    purpose: applications
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    purpose: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    purpose: secrets-management
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+  labels:
+    purpose: centralized-logging
